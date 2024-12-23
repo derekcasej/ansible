@@ -1,6 +1,6 @@
 ---
 - name: Setup Web Stack on Rocky Linux 8
-  hosts: webservers
+  hosts: nextcloud
   become: yes
   vars:
     http_port: 80
