@@ -1,16 +1,18 @@
 ---
-- name: Setup Web Stack on Rocky Linux 8
+- name: Setup Web Stack on Rocky Linux 8 for Nextcloud
   hosts: cloud.wefixdit.com
   become: yes
   become_method: sudo
-  become_user: derek
+  become_user: root
+  gather_facts: true
+
   vars:
     http_port: 80
     https_port: 443
-    nginx_cache_path: /var/cache/nginx
+    apache_port: 8080
     php_fpm_pool_name: www
-    postgresql_dbname: mydatabase
-    postgresql_user: myuser
+    postgresql_dbname: nextcloud
+    postgresql_user: nextcloud
     postgresql_password: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}"
     redis_password: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}"
 
@@ -20,17 +22,35 @@
         name: epel-release
         state: present
 
-    - name: Install Apache, PHP-FPM, Redis, and PostgreSQL
+    - name: Install Nginx
       dnf:
-        name:
-          - httpd
-          - php-fpm
-          - php-pgsql
-          - php-redis
-          - postgresql-server
-          - postgresql-contrib
-          - redis
+        name: nginx
         state: present
+    
+    - name: Configure Nginx as a reverse proxy and caching server
+      template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+      notify:
+        - reload nginx
+
+    - name: Start and enable Nginx service
+      systemd:
+        name: nginx
+        enabled: yes
+        state: started
+
+    - name: Install Apache
+      dnf:
+        name: httpd
+        state: present
+
+    - name: Update Apache to listen on port {{ apache_port }}
+      lineinfile:
+        path: /etc/httpd/conf/httpd.conf
+        regexp: '^Listen '
+        line: "Listen {{ apache_port }}"
+        backup: yes
 
     - name: Start and enable Apache service
       systemd:
@@ -38,72 +58,69 @@
         enabled: yes
         state: started
 
+    - name: Install PHP-FPM and extensions
+      dnf:
+        name:
+          - php-fpm
+          - php-pgsql
+          - php-redis
+        state: present
+    
     - name: Configure PHP-FPM
       template:
         src: templates/php-fpm.conf.j2
         dest: /etc/php-fpm.d/{{ php_fpm_pool_name }}.conf
-      notify: restart php-fpm
+      notify:
+        - restart php-fpm
 
-    - name: Start and enable PHP-FPM service
-      systemd:
-        name: php-fpm
-        enabled: yes
-        state: started
+    - name: Install and configure database (PostgreSQL) & caching (Redis)
+      block:
+        - name: Install Redis and PostgreSQL
+          dnf:
+            name:
+              - redis
+              - postgresql-server
+              - postgresql-contrib
+            state: present
 
-    - name: Start and enable Redis service
-      systemd:
-        name: redis
-        enabled: yes
-        state: started
+        - name: Initialize PostgreSQL database
+          become_user: postgres
+          command: /usr/bin/initdb -D /var/lib/pgsql/data/
+          args:
+            creates: /var/lib/pgsql/data/postgresql.conf
 
-    - name: Initialize PostgreSQL database
-      become_user: postgres
-      command: /usr/bin/initdb --locale=C -D /var/lib/pgsql/data/
-      args:
-        creates: /var/lib/pgsql/data/postgresql.conf
+        - name: Configuration for Redis to require a password
+          lineinfile:
+            path: /etc/redis.conf
+            regexp: '^#?requirepass'
+            line: "requirepass {{ redis_password }}"
+            backup: yes
+          notify:
+            - restart redis
 
-    - name: Start and enable PostgreSQL service
-      systemd:
-        name: postgresql
-        enabled: yes
-        state: started
+        - name: Start and enable services
+          systemd:
+            name: "{{ item.name }}"
+            enabled: yes
+            state: started
+          loop:
+            - {name: 'redis'}
+            - {name: 'postgresql'}
+            - {name: 'php-fpm'}
+            - {name: 'httpd'}
+    
+        - name: Create PostgreSQL database
+          become_user: postgres
+          postgresql_db:
+            name: "{{ postgresql_dbname }}"
 
-    - name: Create PostgreSQL database
-      become_user: postgres
-      postgresql_db:
-        name: "{{ postgresql_dbname }}"
-
-    - name: Create PostgreSQL user with password
-      become_user: postgres
-      postgresql_user:
-        db: "{{ postgresql_dbname }}"
-        name: "{{ postgresql_user }}"
-        password: "{{ postgresql_password }}"
-        priv: ALL
-
-    - name: Configure Redis to require a password
-      lineinfile:
-        path: /etc/redis.conf
-        regexp: '^#?requirepass'
-        line: "requirepass {{ redis_password }}"
-        backup: yes
-      notify: restart redis
-
-    - name: Install Nginx
-      dnf:
-        name: nginx
-        state: present
-
-    - name: Configure Nginx as reverse proxy and caching server
-      template:
-        src: templates/nginx.conf.j2
-        dest: /etc/nginx/nginx.conf
-
-    - name: Start and enable Nginx service
-      systemd:
-        name: nginx
-        enabled: yes
-        state: started
+        - name: Create PostgreSQL user with password
+          become_user: postgres
+          postgresql_user:
+            db: "{{ postgresql_dbname }}"
+            name: "{{ postgresql_user }}"
+            password: "{{ postgresql_password }}"
+            priv: ALL
 
   handlers:
     - name: restart php-fpm
@@ -116,9 +133,7 @@
         name: redis
         state: restarted
 
-  tasks:
-    - name: Display generated passwords
-      debug:
-        msg: |
-          PostgreSQL user '{{ postgresql_user }}' password: {{ postgresql_password }}
-          Redis password: {{ redis_password }}
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
