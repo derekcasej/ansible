@@ -3,7 +3,7 @@
   hosts: cloud.wefixdit.com
   become: yes
   become_method: sudo
-  become_user: derek
+  become_user: root
   gather_facts: true
 
   vars:
