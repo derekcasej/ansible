@@ -1,0 +1,49 @@
+---
+- name: Validate Web Stack Configuration
+  hosts: cloud.wefixdit.com
+  become: yes
+  become_method: sudo
+  become_user: root
+
+  tasks:
+    - name: Check if services are running
+      systemd:
+        name: "{{ item }}"
+        state: started
+      register: service_status
+      loop:
+        - nginx
+        - httpd
+        - php-fpm
+        - postgresql
+        - redis
+
+    - name: Verify Nginx is listening on ports
+      wait_for:
+        port: "{{ item }}"
+        timeout: 5
+      loop:
+        - 80
+        - 443
+
+    - name: Verify Apache is listening on internal port
+      wait_for:
+        port: 8080
+        timeout: 5
+
+    - name: Test PostgreSQL connection
+      become_user: postgres
+      postgresql_ping:
+        db: nextcloud
+        login_user: nextcloud
+        login_password: "{{ postgresql_password }}"
+
+    - name: Check Redis connectivity
+      command: redis-cli -a "{{ redis_password }}" ping
+      register: redis_ping
+      changed_when: false
+
+    - name: Verify PHP-FPM socket
+      stat:
+        path: /var/run/php-fpm/www.sock
+      register: php_socket
