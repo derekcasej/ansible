@@ -7,7 +7,7 @@
   gather_facts: true
 
   vars:
-    ansible_python_interpreter: /usr/bin/python3
+    #ansible_python_interpreter: /usr/bin/python3
     http_port: 80
     https_port: 443
     apache_port: 8080
