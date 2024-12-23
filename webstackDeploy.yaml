@@ -2,6 +2,8 @@
 - name: Setup Web Stack on Rocky Linux 8
   hosts: cloud.wefixdit.com
   become: yes
+  become_method: sudo
+  become_user: derek
   vars:
     http_port: 80
     https_port: 443
