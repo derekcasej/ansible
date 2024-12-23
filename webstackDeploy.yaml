@@ -39,6 +39,11 @@
         name: epel-release
         state: present
 
+    - name: Install Python six library
+      dnf:
+        name: python3-six
+        state: present
+
     - name: Install Python PostgreSQL library
       dnf:
         name: python3-psycopg2
