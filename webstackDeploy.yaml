@@ -2,7 +2,7 @@
 - name: Setup Web Stack on Rocky Linux 8 for Nextcloud
   hosts: cloud.wefixdit.com
   become: yes
-  become_method: sudgito
+  become_method: sudo
   become_user: derek
   gather_facts: true
 
