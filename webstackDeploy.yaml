@@ -7,6 +7,7 @@
   gather_facts: true
 
   vars:
+    ansible_python_interpreter: /usr/bin/python3
     http_port: 80
     https_port: 443
     apache_port: 8080
@@ -36,6 +37,11 @@
     - name: Ensure EPEL repository is installed
       dnf:
         name: epel-release
+        state: present
+
+    - name: Install Python PostgreSQL library
+      dnf:
+        name: python3-psycopg2
         state: present
 
     - name: Install Nginx
