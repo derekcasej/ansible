@@ -25,7 +25,7 @@
       dnf:
         name: "https://rpms.remirepo.net/enterprise/remi-release-8.rpm"
         state: present
-        disable_gpg_check: no
+        disable_gpg_check: yes
 
     - name: Enable REMI PHP 8.2 repository
       command: dnf module reset php -y && dnf module enable php:remi-8.2 -y
