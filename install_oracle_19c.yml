@@ -4,6 +4,7 @@
   become: yes  # Execute tasks with elevated privileges
   become_method: sudo
   become_user: root
+  
   vars:
     # Group and User Definitions
     oracle_group_o: oinstall
