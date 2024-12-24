@@ -1,0 +1,245 @@
+---
+- name: Install Oracle 19c Database on Oracle Linux EL7
+  hosts: oracle_servers
+  become: yes  # Execute tasks with elevated privileges
+  become_method: sudo
+  become_user: root
+  vars:
+    # Group and User Definitions
+    oracle_group_o: oinstall
+    oracle_group_dba: dba
+    oracle_user: oracle
+    oracle_user_uid: 10052
+    oracle_group_o_gid: 10052
+    oracle_group_dba_gid: 10054
+
+    # Installation Paths
+    oracle_base: /u01/app/oracle
+    oracle_home: "{{ oracle_base }}/product/19.0.0/dbhome_1"
+    data_dir: /u02/oradata
+    ora_inventory: /u01/app/oraInventory
+
+    # Oracle Software Details
+    oracle_zip_src: "files/LINUX.X64_193000_db_home.zip"
+    oracle_zip_dest: "{{ oracle_home }}/"
+    response_file_template: "templates/db_install.rsp.j2"
+    response_file_dest: "{{ oracle_home }}/install/response/db_install.rsp"
+
+    # Oracle SID (Customize as needed)
+    oracle_sid: test
+
+    # Passwords (Use Ansible Vault for securing sensitive data)
+    db_sys_password: "G3@4SukN2Ypj0#dP"
+    db_system_password: "YmY#^WX1a6qO4VuQ"
+    db_snmp_password: "3FFl96E^06l#RGot"
+    pdbadmin_password: "hWI#wy00qAUNy3Cr"
+
+  tasks:
+
+    - name: Verify the server is Oracle Linux 7.x
+      command: cat /etc/redhat-release
+      register: rh_release
+      become: no  # Run as the current user
+
+    - name: Fail if OS is not Oracle Linux Server release 7.x
+      fail:
+        msg: "This playbook requires Oracle Linux Server release 7.x"
+      when: rh_release.stdout.find("Oracle Linux Server release 7") == -1
+
+    - name: Create necessary directories for Oracle installation
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ oracle_user }}"
+        group: "{{ oracle_group_o }}"
+        mode: '0775'
+      loop:
+        - "{{ oracle_home }}"
+        - "{{ data_dir }}"
+        - "{{ ora_inventory }}"
+
+    - name: Create group 'oinstall' with GID 10052
+      group:
+        name: "{{ oracle_group_o }}"
+        gid: "{{ oracle_group_o_gid }}"
+        state: present
+
+    - name: Create group 'dba' with GID 10054
+      group:
+        name: "{{ oracle_group_dba }}"
+        gid: "{{ oracle_group_dba_gid }}"
+        state: present
+
+    - name: Create Oracle user with UID 10052
+      user:
+        name: "{{ oracle_user }}"
+        uid: "{{ oracle_user_uid }}"
+        group: "{{ oracle_group_o }}"
+        groups: "{{ oracle_group_dba }}"
+        shell: /bin/bash
+        create_home: yes
+        home: "/home/{{ oracle_user }}"
+        state: present
+
+    - name: Ensure ownership and permissions of /u01 and /u02
+      file:
+        path: "{{ item }}"
+        owner: "{{ oracle_user }}"
+        group: "{{ oracle_group_o }}"
+        mode: '0775'
+        recurse: yes
+      loop:
+        - /u01
+        - /u02
+
+    - name: Install pre-requisite packages for Oracle 19c
+      yum:
+        name: oracle-database-preinstall-19c
+        state: present
+
+    - name: Copy Oracle installation zip to the server
+      copy:
+        src: "{{ oracle_zip_src }}"
+        dest: "{{ oracle_zip_dest }}/LINUX.X64_193000_db_home.zip"
+        owner: "{{ oracle_user }}"
+        group: "{{ oracle_group_o }}"
+        mode: '0644'
+
+    - name: Unzip Oracle Database Home as oracle user
+      become_user: "{{ oracle_user }}"
+      unarchive:
+        src: "{{ oracle_home }}/LINUX.X64_193000_db_home.zip"
+        dest: "{{ oracle_home }}"
+        remote_src: yes
+      args:
+        creates: "{{ oracle_home }}/dbhome_1"  # Adjust if necessary
+
+    - name: Create install/response directory
+      file:
+        path: "{{ oracle_home }}/install/response"
+        state: directory
+        owner: "{{ oracle_user }}"
+        group: "{{ oracle_group_o }}"
+        mode: '0755'
+
+    - name: Deploy customized response file
+      template:
+        src: "{{ response_file_template }}"
+        dest: "{{ response_file_dest }}"
+        owner: "{{ oracle_user }}"
+        group: "{{ oracle_group_o }}"
+        mode: '0644'
+
+    - name: Run pre-installation prerequisite checks
+      become_user: "{{ oracle_user }}"
+      shell: |
+        {{ oracle_home }}/runInstaller -executePrereqs -silent -responseFile {{ response_file_dest }} > {{ oracle_home }}/install/preinstall.log 2>&1
+      args:
+        chdir: "{{ oracle_home }}"
+      register: prereq_check
+      ignore_errors: no
+
+    - name: Ensure pre-requisites passed
+      fail:
+        msg: "Pre-requisites check failed. Check the preinstall.log for details."
+      when: prereq_check.rc != 0
+
+    - name: Run Oracle 19c installer silently
+      become_user: "{{ oracle_user }}"
+      shell: |
+        {{ oracle_home }}/runInstaller -silent -responseFile {{ response_file_dest }} > {{ oracle_home }}/install/install.log 2>&1
+      args:
+        chdir: "{{ oracle_home }}"
+      async: 7200  # Adjust based on expected install duration
+      poll: 0
+      register: install_job
+
+    - name: Wait for Oracle installer to complete
+      async_status:
+        jid: "{{ install_job.ansible_job_id }}"
+      register: install_status
+      until: install_status.finished
+      retries: 300  # Number of retries (e.g., 300 retries * delay 60s = 5 hours)
+      delay: 60
+
+    - name: Check Oracle installer result
+      fail:
+        msg: "Oracle installer failed. Check the install.log for details."
+      when: install_status.rc != 0
+
+    - name: Execute orainstRoot.sh as root
+      command: /u01/app/oraInventory/orainstRoot.sh
+      become: yes
+      become_user: root
+      args:
+        creates: /u01/app/oraInventory/.orainstRoot.done
+      register: orainst_root
+
+    - name: Mark orainstRoot.sh as executed
+      file:
+        path: /u01/app/oraInventory/.orainstRoot.done
+        state: touch
+      when: orainst_root.changed
+
+    - name: Execute root.sh as root
+      command: /u01/app/oracle/product/19.0.0/dbhome_1/root.sh
+      become: yes
+      become_user: root
+      args:
+        creates: /u01/app/oracle/product/19.0.0/dbhome_1/.root.sh.done
+      register: root_sh
+
+    - name: Mark root.sh as executed
+      file:
+        path: /u01/app/oracle/product/19.0.0/dbhome_1/.root.sh.done
+        state: touch
+      when: root_sh.changed
+
+    - name: Configure Oracle environment variables for oracle user
+      block:
+        - name: Set ORACLE_HOME in .bash_profile
+          lineinfile:
+            path: /home/{{ oracle_user }}/.bash_profile
+            regexp: '^export ORACLE_HOME='
+            line: "export ORACLE_HOME={{ oracle_home }}"
+            create: yes
+            owner: "{{ oracle_user }}"
+            group: "{{ oracle_group_o }}"
+            mode: '0644'
+
+        - name: Add Oracle bin to PATH in .bash_profile
+          lineinfile:
+            path: /home/{{ oracle_user }}/.bash_profile
+            regexp: '^export PATH='
+            line: "export PATH={{ oracle_home }}/bin:\$PATH"
+            create: yes
+            owner: "{{ oracle_user }}"
+            group: "{{ oracle_group_o }}"
+            mode: '0644'
+
+    - name: Source environment and verify SQLPlus version
+      become_user: "{{ oracle_user }}"
+      shell: |
+        source /home/{{ oracle_user }}/.bash_profile
+        sqlplus -v
+      register: sqlplus_version
+
+    - name: Display SQLPlus version
+      debug:
+        msg: "SQLPlus Version: {{ sqlplus_version.stdout }}"
+
+    - name: Verify sqlplus is in PATH
+      become_user: "{{ oracle_user }}"
+      shell: |
+        source /home/{{ oracle_user }}/.bash_profile
+        which sqlplus
+      register: sqlplus_path
+
+    - name: Display SQLPlus path
+      debug:
+        msg: "SQLPlus Path: {{ sqlplus_path.stdout }}"
+
+    - name: Additional Verification Checks
+      # Add any additional verification or validation tasks here
+      debug:
+        msg: "Oracle 19c installation and basic verification completed successfully."
