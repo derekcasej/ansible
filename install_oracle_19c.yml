@@ -1,7 +1,7 @@
 ---
 - name: Install Oracle 19c Database on Oracle Linux EL7
   hosts: deploy.wefixdit.com
-  become: yes  # Execute tasks with elevated privileges
+  become: yes  
   become_method: sudo
   become_user: root
   
