@@ -1,0 +1,73 @@
+---
+- name: Oracle Linux EL7 Configuration Playbook
+  hosts: all
+  become: yes
+  tasks:
+
+    - name: Install EPEL repository
+      yum:
+        name: epel-release
+        state: present
+
+    - name: Download Remi repository RPM
+      get_url:
+        url: https://rpms.remirepo.net/enterprise/remi-release-7.rpm
+        dest: /tmp/remi-release-7.rpm
+        creates: /tmp/remi-release-7.rpm
+      register: remi_repo_installed
+
+    - name: Install Remi repository RPM
+      yum:
+        name: "/tmp/remi-release-7.rpm"
+        state: present
+      when: remi_repo_installed.changed
+
+    - name: Validate Remi repository installation
+      command: yum repolist enabled | grep remi
+      register: remi_repo_validation
+      changed_when: false
+
+    - name: Fail if Remi repository is not enabled
+      fail:
+        msg: "Remi repository is not properly configured."
+      when: remi_repo_validation.rc != 0
+
+    - name: Update all packages
+      yum:
+        name: "*"
+        state: latest
+      register: package_update
+
+    - name: Warn if many packages are updated
+      debug:
+        msg: "{{ package_update.results | length }} packages were updated. Consider reviewing the changes."
+      when: package_update.results | length > 10
+
+    - name: Install development tools group
+      yum:
+        name: "@Development Tools"
+        state: present
+
+    - name: Install additional necessary packages
+      yum:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - vim
+        - net-tools
+        - bind-utils  # DNS query tools for EL7
+
+    - name: Ensure wheel group can use sudo without a password
+      lineinfile:
+        path: /etc/sudoers.d/wheel-nopasswd
+        line: "%wheel ALL=(ALL) NOPASSWD: ALL"
+        validate: "visudo -cf %s"
+
+    - name: Validate sudo configuration
+      command: visudo -c
+      register: sudo_validation
+
+    - name: Fail if sudo configuration is invalid
+      fail:
+        msg: "Invalid sudo configuration detected."
+      when: sudo_validation.rc != 0
