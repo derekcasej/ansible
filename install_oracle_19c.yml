@@ -41,7 +41,7 @@
     - name: Verify the server is Oracle Linux 7.x
       command: cat /etc/redhat-release
       register: rh_release
-      become: no  # Run as the current user
+      
 
     - name: Fail if OS is not Oracle Linux Server release 7.x
       fail:
