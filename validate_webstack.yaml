@@ -2,9 +2,6 @@
 - name: Validate Web Stack Configuration
   hosts: cloud.wefixdit.com
   become: yes
-  become_method: sudo
-  become_user: root
-
   tasks:
     - name: Check if services are running
       systemd:
