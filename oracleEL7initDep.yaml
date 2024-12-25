@@ -9,29 +9,6 @@
         name: epel-release
         state: present
 
-    - name: Download Remi repository RPM
-      get_url:
-        url: https://rpms.remirepo.net/enterprise/remi-release-7.rpm
-        dest: /tmp/remi-release-7.rpm
-        creates: /tmp/remi-release-7.rpm
-      register: remi_repo_installed
-
-    - name: Install Remi repository RPM
-      yum:
-        name: "/tmp/remi-release-7.rpm"
-        state: present
-      when: remi_repo_installed.changed
-
-    - name: Validate Remi repository installation
-      command: yum repolist enabled | grep remi
-      register: remi_repo_validation
-      changed_when: false
-
-    - name: Fail if Remi repository is not enabled
-      fail:
-        msg: "Remi repository is not properly configured."
-      when: remi_repo_validation.rc != 0
-
     - name: Update all packages
       yum:
         name: "*"
