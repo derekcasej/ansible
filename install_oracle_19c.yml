@@ -108,7 +108,6 @@
         mode: '0644'
 
     - name: Unzip Oracle Database Home as oracle user
-      become_user: "{{ oracle_user }}"
       unarchive:
         src: "{{ oracle_home }}/LINUX.X64_193000_db_home.zip"
         dest: "{{ oracle_home }}"
