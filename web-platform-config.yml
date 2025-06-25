@@ -1,0 +1,546 @@
+---
+- name: Configure web platform services (Nginx reverse proxy to Apache)
+  hosts: all
+  become: yes
+  gather_facts: yes
+  
+  vars_prompt:
+    - name: domain_name
+      prompt: "Primary domain name (e.g., example.com)"
+      private: no
+    
+    - name: admin_email
+      prompt: "Administrator email for SSL certificates"
+      private: no
+    
+    - name: additional_domains
+      prompt: "Additional domains (comma-separated, optional)"
+      default: ""
+      private: no
+
+  vars:
+    mysql_root_password: "{{ lookup('password', '/tmp/mysql_root_password chars=ascii_letters,digits length=12') }}"
+    apache_port: 9990
+    nginx_cache_path: /var/cache/nginx
+    php_fpm_socket: /run/php-fpm/www.sock
+
+  tasks:
+    - name: Generate MySQL root password
+      set_fact:
+        mysql_root_password: "{{ lookup('password', '/dev/null chars=ascii_letters,digits length=12') }}"
+
+    - name: Stop services for configuration
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - httpd
+        - nginx
+        - mariadb
+      ignore_errors: yes
+
+    # MySQL/MariaDB Configuration
+    - name: Start MariaDB for initial setup
+      systemd:
+        name: mariadb
+        state: started
+
+    - name: Secure MariaDB installation - Set root password
+      mysql_user:
+        name: root
+        password: "{{ mysql_root_password }}"
+        login_unix_socket: /var/lib/mysql/mysql.sock
+        state: present
+      ignore_errors: yes
+
+    - name: Create MySQL root credentials file
+      copy:
+        content: |
+          [client]
+          user=root
+          password={{ mysql_root_password }}
+        dest: /root/.my.cnf
+        mode: '0600'
+        owner: root
+        group: root
+
+    - name: Remove anonymous MySQL users
+      mysql_user:
+        name: ""
+        host_all: yes
+        state: absent
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Remove MySQL test database
+      mysql_db:
+        name: test
+        state: absent
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Disallow root login remotely
+      mysql_user:
+        name: root
+        host: "{{ item }}"
+        state: absent
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+      loop:
+        - "{{ ansible_hostname }}"
+        - 127.0.0.1
+        - ::1
+        - localhost
+      ignore_errors: yes
+
+    # Apache Configuration
+    - name: Configure Apache to listen on port {{ apache_port }}
+      lineinfile:
+        path: /etc/httpd/conf/httpd.conf
+        regexp: '^Listen 80'
+        line: 'Listen {{ apache_port }}'
+        backup: yes
+
+    - name: Configure Apache ServerName
+      lineinfile:
+        path: /etc/httpd/conf/httpd.conf
+        regexp: '^#?ServerName'
+        line: 'ServerName {{ domain_name }}:{{ apache_port }}'
+        backup: yes
+
+    - name: Create Apache virtual host directory
+      file:
+        path: /etc/httpd/conf.d/vhosts
+        state: directory
+        mode: '0755'
+
+    - name: Create default Apache virtual host
+      copy:
+        content: |
+          <VirtualHost *:{{ apache_port }}>
+              ServerName {{ domain_name }}
+              {% if additional_domains %}
+              ServerAlias {{ additional_domains.replace(',', ' ') }}
+              {% endif %}
+              DocumentRoot /var/www/html/{{ domain_name }}
+              
+              <Directory /var/www/html/{{ domain_name }}>
+                  AllowOverride All
+                  Require all granted
+              </Directory>
+              
+              # PHP-FPM Configuration
+              <FilesMatch \.php$>
+                  SetHandler "proxy:unix:{{ php_fpm_socket }}|fcgi://localhost"
+              </FilesMatch>
+              
+              # Security headers
+              Header always set X-Content-Type-Options nosniff
+              Header always set X-Frame-Options DENY
+              Header always set X-XSS-Protection "1; mode=block"
+              
+              ErrorLog /var/log/httpd/{{ domain_name }}_error.log
+              CustomLog /var/log/httpd/{{ domain_name }}_access.log combined
+          </VirtualHost>
+        dest: /etc/httpd/conf.d/vhosts/{{ domain_name }}.conf
+
+    - name: Enable Apache modules
+      lineinfile:
+        path: /etc/httpd/conf.modules.d/00-base.conf
+        line: "LoadModule {{ item }}"
+        create: yes
+      loop:
+        - "rewrite_module modules/mod_rewrite.so"
+        - "headers_module modules/mod_headers.so"
+      notify: restart httpd
+
+    # PHP-FPM Configuration
+    - name: Configure PHP-FPM for performance
+      blockinfile:
+        path: /etc/php-fpm.d/www.conf
+        marker: "; {mark} ANSIBLE MANAGED BLOCK"
+        block: |
+          ; Performance settings
+          pm = dynamic
+          pm.max_children = 50
+          pm.start_servers = 5
+          pm.min_spare_servers = 5
+          pm.max_spare_servers = 35
+          pm.process_idle_timeout = 10s
+          pm.max_requests = 500
+          
+          ; Security
+          security.limit_extensions = .php .php3 .php4 .php5 .php7 .php8
+        backup: yes
+      notify: restart php-fpm
+
+    - name: Configure PHP settings
+      lineinfile:
+        path: /etc/php.ini
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        backup: yes
+      loop:
+        - { regexp: '^;?memory_limit', line: 'memory_limit = 256M' }
+        - { regexp: '^;?upload_max_filesize', line: 'upload_max_filesize = 64M' }
+        - { regexp: '^;?post_max_size', line: 'post_max_size = 64M' }
+        - { regexp: '^;?max_execution_time', line: 'max_execution_time = 300' }
+        - { regexp: '^;?max_input_vars', line: 'max_input_vars = 3000' }
+        - { regexp: '^;?opcache.enable', line: 'opcache.enable=1' }
+        - { regexp: '^;?opcache.memory_consumption', line: 'opcache.memory_consumption=128' }
+        - { regexp: '^;?opcache.max_accelerated_files', line: 'opcache.max_accelerated_files=4000' }
+      notify: restart php-fpm
+
+    # Redis Configuration
+    - name: Configure Redis for web caching
+      blockinfile:
+        path: /etc/redis/redis.conf
+        marker: "# {mark} ANSIBLE MANAGED BLOCK"
+        block: |
+          # Web caching configuration
+          maxmemory 128mb
+          maxmemory-policy allkeys-lru
+          timeout 0
+          tcp-keepalive 300
+        backup: yes
+      notify: restart redis
+
+    # Nginx Configuration
+    - name: Create Nginx cache directory
+      file:
+        path: "{{ nginx_cache_path }}"
+        state: directory
+        owner: nginx
+        group: nginx
+        mode: '0755'
+
+    - name: Create Nginx log directory
+      file:
+        path: /var/log/nginx/{{ domain_name }}
+        state: directory
+        owner: nginx
+        group: nginx
+        mode: '0755'
+
+    - name: Configure main Nginx configuration
+      copy:
+        content: |
+          user nginx;
+          worker_processes auto;
+          error_log /var/log/nginx/error.log warn;
+          pid /var/run/nginx.pid;
+          
+          events {
+              worker_connections 1024;
+              use epoll;
+              multi_accept on;
+          }
+          
+          http {
+              include /etc/nginx/mime.types;
+              default_type application/octet-stream;
+              
+              # Logging
+              log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                              '$status $body_bytes_sent "$http_referer" '
+                              '"$http_user_agent" "$http_x_forwarded_for"';
+              
+              # Performance
+              sendfile on;
+              tcp_nopush on;
+              tcp_nodelay on;
+              keepalive_timeout 65;
+              types_hash_max_size 2048;
+              client_max_body_size 64M;
+              
+              # Gzip compression
+              gzip on;
+              gzip_vary on;
+              gzip_min_length 1024;
+              gzip_types text/plain text/css text/xml text/javascript 
+                         application/x-javascript application/xml+rss 
+                         application/javascript application/json;
+              
+              # Cache configuration
+              proxy_cache_path {{ nginx_cache_path }} levels=1:2 keys_zone=web_cache:10m 
+                               max_size=1g inactive=60m use_temp_path=off;
+              
+              # Security headers
+              add_header X-Frame-Options DENY always;
+              add_header X-Content-Type-Options nosniff always;
+              add_header X-XSS-Protection "1; mode=block" always;
+              add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+              
+              # Include virtual hosts
+              include /etc/nginx/conf.d/*.conf;
+              include /etc/nginx/sites-enabled/*;
+          }
+        dest: /etc/nginx/nginx.conf
+        backup: yes
+
+    - name: Create Nginx sites directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /etc/nginx/sites-available
+        - /etc/nginx/sites-enabled
+
+    - name: Create Nginx virtual host for {{ domain_name }}
+      copy:
+        content: |
+          # Rate limiting
+          limit_req_zone $binary_remote_addr zone=login:10m rate=10r/m;
+          limit_req_zone $binary_remote_addr zone=general:10m rate=10r/s;
+          
+          # Upstream backend
+          upstream apache_backend {
+              server 127.0.0.1:{{ apache_port }};
+              keepalive 32;
+          }
+          
+          server {
+              listen 80;
+              server_name {{ domain_name }}{% if additional_domains %} {{ additional_domains.replace(',', ' ') }}{% endif %};
+              
+              # Redirect to HTTPS
+              return 301 https://$server_name$request_uri;
+          }
+          
+          server {
+              listen 443 ssl http2;
+              server_name {{ domain_name }}{% if additional_domains %} {{ additional_domains.replace(',', ' ') }}{% endif %};
+              
+              # SSL Configuration (placeholder - use certbot later)
+              ssl_certificate /etc/ssl/certs/{{ domain_name }}.crt;
+              ssl_certificate_key /etc/ssl/private/{{ domain_name }}.key;
+              ssl_protocols TLSv1.2 TLSv1.3;
+              ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384;
+              ssl_prefer_server_ciphers off;
+              
+              # Logs
+              access_log /var/log/nginx/{{ domain_name }}/access.log main;
+              error_log /var/log/nginx/{{ domain_name }}/error.log warn;
+              
+              # Rate limiting
+              limit_req zone=general burst=20 nodelay;
+              
+              # Static file handling
+              location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+                  expires 1y;
+                  add_header Cache-Control "public, immutable";
+                  try_files $uri @apache;
+              }
+              
+              # Proxy to Apache
+              location / {
+                  # Rate limiting for login pages
+                  location ~* /(wp-login|admin|login) {
+                      limit_req zone=login burst=5 nodelay;
+                      proxy_pass http://apache_backend;
+                      include /etc/nginx/proxy_params;
+                  }
+                  
+                  proxy_pass http://apache_backend;
+                  include /etc/nginx/proxy_params;
+                  
+                  # Caching
+                  proxy_cache web_cache;
+                  proxy_cache_valid 200 302 10m;
+                  proxy_cache_valid 404 1m;
+                  proxy_cache_bypass $http_pragma $http_authorization;
+                  add_header X-Cache-Status $upstream_cache_status;
+              }
+              
+              # Apache fallback
+              location @apache {
+                  proxy_pass http://apache_backend;
+                  include /etc/nginx/proxy_params;
+              }
+          }
+        dest: /etc/nginx/sites-available/{{ domain_name }}
+
+    - name: Create Nginx proxy parameters
+      copy:
+        content: |
+          proxy_set_header Host $http_host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-Host $host;
+          proxy_set_header X-Forwarded-Port $server_port;
+          
+          proxy_connect_timeout 30s;
+          proxy_send_timeout 30s;
+          proxy_read_timeout 30s;
+          
+          proxy_buffering on;
+          proxy_buffer_size 4k;
+          proxy_buffers 8 4k;
+          proxy_busy_buffers_size 8k;
+        dest: /etc/nginx/proxy_params
+
+    - name: Enable Nginx site
+      file:
+        src: /etc/nginx/sites-available/{{ domain_name }}
+        dest: /etc/nginx/sites-enabled/{{ domain_name }}
+        state: link
+
+    - name: Create website document root
+      file:
+        path: /var/www/html/{{ domain_name }}
+        state: directory
+        owner: apache
+        group: apache
+        mode: '0755'
+
+    - name: Create default index page
+      copy:
+        content: |
+          <?php
+          echo "<h1>Welcome to {{ domain_name }}</h1>";
+          echo "<p>Server: " . $_SERVER['SERVER_SOFTWARE'] . "</p>";
+          echo "<p>PHP Version: " . phpversion() . "</p>";
+          echo "<p>Server IP: " . $_SERVER['SERVER_ADDR'] . "</p>";
+          
+          // Test Redis connection
+          if (extension_loaded('redis')) {
+              $redis = new Redis();
+              if ($redis->connect('127.0.0.1', 6379)) {
+                  echo "<p>Redis: Connected</p>";
+                  $redis->close();
+              } else {
+                  echo "<p>Redis: Connection failed</p>";
+              }
+          } else {
+              echo "<p>Redis: Extension not loaded</p>";
+          }
+          ?>
+        dest: /var/www/html/{{ domain_name }}/index.php
+        owner: apache
+        group: apache
+        mode: '0644'
+
+    - name: Generate self-signed SSL certificate (temporary)
+      command: >
+        openssl req -new -newkey rsa:2048 -days 365 -nodes -x509
+        -keyout /etc/ssl/private/{{ domain_name }}.key
+        -out /etc/ssl/certs/{{ domain_name }}.crt
+        -subj "/C=US/ST=State/L=City/O=Organization/CN={{ domain_name }}"
+      creates: /etc/ssl/certs/{{ domain_name }}.crt
+
+    - name: Set SSL certificate permissions
+      file:
+        path: "{{ item.path }}"
+        mode: "{{ item.mode }}"
+        owner: root
+        group: root
+      loop:
+        - { path: "/etc/ssl/private/{{ domain_name }}.key", mode: "0600" }
+        - { path: "/etc/ssl/certs/{{ domain_name }}.crt", mode: "0644" }
+
+    - name: Configure SELinux for custom ports
+      sefcontext:
+        target: "{{ item.target }}"
+        setype: "{{ item.setype }}"
+        state: present
+      loop:
+        - { target: "/var/cache/nginx(/.*)?", setype: "httpd_cache_t" }
+        - { target: "/etc/nginx/sites-available(/.*)?", setype: "httpd_config_t" }
+        - { target: "/etc/nginx/sites-enabled(/.*)?", setype: "httpd_config_t" }
+      notify: restorecon
+
+    - name: Allow Apache on custom port in SELinux
+      seport:
+        ports: "{{ apache_port }}"
+        proto: tcp
+        setype: http_port_t
+        state: present
+
+    - name: Allow Nginx to connect to Apache backend
+      seboolean:
+        name: httpd_can_network_connect
+        state: yes
+        persistent: yes
+
+    # Start all services
+    - name: Start and enable all services
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - mariadb
+        - redis
+        - php-fpm
+        - httpd
+        - nginx
+
+    - name: Configure firewall
+      firewalld:
+        port: "{{ item }}"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      loop:
+        - "80/tcp"
+        - "443/tcp"
+
+    - name: Display configuration summary
+      debug:
+        msg: |
+          === Web Platform Configuration Completed ===
+          
+          MySQL/MariaDB:
+          - Root password: {{ mysql_root_password }}
+          - Credentials saved to: /root/.my.cnf
+          
+          Services Configuration:
+          - Nginx: Port 80/443 (reverse proxy)
+          - Apache: Port {{ apache_port }} (backend)
+          - PHP-FPM: Socket {{ php_fpm_socket }}
+          - Redis: Port 6379 (caching)
+          
+          Website:
+          - Primary domain: {{ domain_name }}
+          {% if additional_domains %}
+          - Additional domains: {{ additional_domains }}
+          {% endif %}
+          - Document root: /var/www/html/{{ domain_name }}
+          - Test URL: http://{{ domain_name }} (redirects to HTTPS)
+          
+          SSL Certificate:
+          - Self-signed certificate created (temporary)
+          - Run certbot for Let's Encrypt: 
+            certbot --nginx -d {{ domain_name }} -m {{ admin_email }}
+          
+          Next Steps:
+          1. Update DNS to point {{ domain_name }} to this server
+          2. Run certbot for production SSL certificates
+          3. Upload your website files to /var/www/html/{{ domain_name }}
+          4. Create additional virtual hosts as needed
+
+  handlers:
+    - name: restart httpd
+      systemd:
+        name: httpd
+        state: restarted
+
+    - name: restart php-fpm
+      systemd:
+        name: php-fpm
+        state: restarted
+
+    - name: restart redis
+      systemd:
+        name: redis
+        state: restarted
+
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+    - name: restorecon
+      command: restorecon -R /var/cache/nginx /etc/nginx/sites-available /etc/nginx/sites-enabled

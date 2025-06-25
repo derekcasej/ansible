@@ -1,0 +1,295 @@
+---
+- name: Deploy web platform on RHEL/CentOS/Fedora
+  hosts: all
+  become: yes
+  gather_facts: yes
+  
+  vars_prompt:
+    - name: php_version
+      prompt: "PHP version (8.1, 8.2, 8.3)"
+      default: "8.3"
+      private: no
+    
+    - name: mariadb_version
+      prompt: "MariaDB version (10.5, 10.6, 10.11, 11.4)"
+      default: "10.11"
+      private: no
+    
+    - name: nginx_type
+      prompt: "Nginx type (stable, mainline)"
+      default: "stable"
+      private: no
+  
+  vars:
+    packages:
+      - httpd
+      - nginx
+      - mariadb-server
+      - mariadb
+      - redis
+      - php
+      - php-fpm
+      - php-mysqlnd
+      - php-pdo
+      - php-gd
+      - php-mbstring
+      - php-xml
+      - php-json
+      - php-curl
+      - php-zip
+      - php-intl
+      - php-soap
+      - php-bcmath
+      - php-opcache
+      - php-redis
+      - php-cli
+      - php-common
+      - php-devel
+      - gcc
+      - gcc-c++
+      - make
+      - cmake
+      - autoconf
+      - automake
+      - libtool
+      - pkgconfig
+      - git
+      - wget
+      - curl
+      - vim
+      - nano
+      - htop
+      - tree
+      - unzip
+      - zip
+      - tar
+      - rsync
+      - openssl-devel
+      - zlib-devel
+      - libcurl-devel
+      - libxml2-devel
+      - sqlite-devel
+      - bzip2-devel
+      - readline-devel
+      - ncurses-devel
+      - gdbm-devel
+      - db4-devel
+      - libffi-devel
+      - expat-devel
+      - python3-pip
+      - nodejs
+      - npm
+      - composer
+      - certbot
+      - python3-certbot-apache
+      - python3-certbot-nginx
+      - firewalld
+    
+    services:
+      - httpd
+      - nginx
+      - mariadb
+      - redis
+      - php-fpm
+      - firewalld
+
+  tasks:
+    - name: Detect OS distribution
+      set_fact:
+        is_rhel: "{{ ansible_distribution in ['RedHat', 'CentOS', 'Rocky', 'AlmaLinux'] }}"
+        is_fedora: "{{ ansible_distribution == 'Fedora' }}"
+        os_major_version: "{{ ansible_distribution_major_version }}"
+
+    - name: Install EPEL repository (RHEL/CentOS)
+      dnf:
+        name: epel-release
+        state: present
+      when: is_rhel
+
+    - name: Install Remi repository (RHEL/CentOS 8)
+      dnf:
+        name: "https://rpms.remirepo.net/enterprise/remi-release-{{ os_major_version }}.rpm"
+        state: present
+        disable_gpg_check: yes
+      when: is_rhel and os_major_version in ['8', '9']
+
+    - name: Install Remi repository (Fedora)
+      dnf:
+        name: "https://rpms.remirepo.net/fedora/remi-release-{{ os_major_version }}.rpm"
+        state: present
+        disable_gpg_check: yes
+      when: is_fedora
+
+    - name: Enable PowerTools/CRB repository (RHEL/CentOS 8)
+      command: dnf config-manager --enable powertools
+      when: is_rhel and os_major_version == '8'
+      changed_when: false
+
+    - name: Enable CRB repository (RHEL/CentOS 9)
+      command: dnf config-manager --enable crb
+      when: is_rhel and os_major_version == '9'
+      changed_when: false
+
+    - name: Reset PHP module stream
+      command: dnf module reset -y php
+      when: is_rhel
+      changed_when: false
+
+    - name: Enable PHP module stream from Remi
+      command: "dnf module enable -y php:remi-{{ php_version }}"
+      when: is_rhel
+      changed_when: false
+
+    - name: Reset MariaDB module stream
+      command: dnf module reset -y mariadb
+      when: is_rhel and mariadb_version != '10.5'
+      changed_when: false
+
+    - name: Enable MariaDB module stream
+      command: "dnf module enable -y mariadb:{{ mariadb_version }}"
+      when: is_rhel and mariadb_version != '10.5'
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Setup Nginx mainline repository
+      yum_repository:
+        name: nginx-mainline
+        description: nginx mainline repo
+        baseurl: "http://nginx.org/packages/mainline/centos/{{ os_major_version }}/$basearch/"
+        gpgcheck: yes
+        enabled: yes
+        gpgkey: https://nginx.org/keys/nginx_signing.key
+        module_hotfixes: yes
+      when: nginx_type == 'mainline' and is_rhel
+
+    - name: Import Nginx GPG key
+      rpm_key:
+        key: https://nginx.org/keys/nginx_signing.key
+        state: present
+      when: nginx_type == 'mainline' and is_rhel
+
+    - name: Update all packages
+      dnf:
+        name: "*"
+        state: latest
+        update_cache: yes
+
+    - name: Install web platform packages
+      dnf:
+        name: "{{ packages }}"
+        state: present
+        update_cache: yes
+
+    - name: Enable and start services
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop: "{{ services }}"
+
+    - name: Configure firewall for HTTP and HTTPS
+      firewalld:
+        service: "{{ item }}"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      loop:
+        - http
+        - https
+
+    - name: Create web directory
+      file:
+        path: /var/www/html
+        state: directory
+        owner: apache
+        group: apache
+        mode: '0755'
+
+    - name: Set SELinux context for web directory
+      command: restorecon -R /var/www/html
+      changed_when: false
+
+    - name: Create PHP info file
+      copy:
+        content: |
+          <?php
+          phpinfo();
+          ?>
+        dest: /var/www/html/info.php
+        owner: apache
+        group: apache
+        mode: '0644'
+
+    - name: Configure PHP-FPM user
+      lineinfile:
+        path: /etc/php-fpm.d/www.conf
+        regexp: '^user = '
+        line: 'user = apache'
+        backup: yes
+      notify: restart php-fpm
+
+    - name: Configure PHP-FPM group
+      lineinfile:
+        path: /etc/php-fpm.d/www.conf
+        regexp: '^group = '
+        line: 'group = apache'
+        backup: yes
+      notify: restart php-fpm
+
+    - name: Configure PHP-FPM listen socket
+      lineinfile:
+        path: /etc/php-fpm.d/www.conf
+        regexp: '^listen = '
+        line: 'listen = /run/php-fpm/www.sock'
+        backup: yes
+      notify: restart php-fpm
+
+    - name: Configure PHP-FPM socket ownership
+      lineinfile:
+        path: /etc/php-fpm.d/www.conf
+        regexp: '^listen.owner = '
+        line: 'listen.owner = apache'
+        backup: yes
+      notify: restart php-fpm
+
+    - name: Configure PHP-FPM socket group
+      lineinfile:
+        path: /etc/php-fpm.d/www.conf
+        regexp: '^listen.group = '
+        line: 'listen.group = apache'
+        backup: yes
+      notify: restart php-fpm
+
+    - name: Get installed versions
+      shell: |
+        echo "PHP: $(php --version | head -n1)"
+        echo "MariaDB: $(mariadb --version)"
+        echo "Apache: $(httpd -v | head -n1)"
+        echo "Nginx: $(nginx -v 2>&1)"
+      register: version_info
+      changed_when: false
+
+    - name: Display deployment summary
+      debug:
+        msg: |
+          === RHEL/CentOS/Fedora Web Platform Deployment Completed ===
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          Selected versions:
+          - PHP: {{ php_version }}
+          - MariaDB: {{ mariadb_version }}
+          - Nginx: {{ nginx_type }}
+          
+          Installed versions:
+          {{ version_info.stdout }}
+          
+          Next steps:
+          1. Run 'sudo mysql_secure_installation' to secure MariaDB
+          2. Configure Apache/Nginx virtual hosts (both running on port 80)
+          3. PHP info page: http://{{ ansible_default_ipv4.address }}/info.php
+          4. Ready for CrowdSec installation with separate playbook
+
+  handlers:
+    - name: restart php-fpm
+      systemd:
+        name: php-fpm
+        state: restarted
