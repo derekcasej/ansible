@@ -48,7 +48,6 @@
     
     services:
       - httpd
-      - nginx
       - mariadb
       - redis
       - php-fpm
@@ -186,28 +185,14 @@
       when: dry_run is not defined or not dry_run
 
     # NGINX CONFIGURATION (Front-end proxy)
-    - name: Create Nginx configuration for Invoice Ninja
+    - name: Create Nginx configuration for Invoice Ninja (HTTP only initially)
       copy:
         content: |
           server {
               listen 80;
               server_name {{ domain_name }};
               
-              # Redirect HTTP to HTTPS
-              return 301 https://$server_name$request_uri;
-          }
-          
-          server {
-              listen 443 ssl http2;
-              server_name {{ domain_name }};
-              
-              # SSL Configuration (certificates will be managed by certbot)
-              ssl_certificate /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem;
-              ssl_certificate_key /etc/letsencrypt/live/{{ domain_name }}/privkey.pem;
-              ssl_protocols TLSv1.2 TLSv1.3;
-              ssl_ciphers HIGH:!aNULL:!MD5;
-              
-              # Caching
+              # Caching for static assets
               location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
                   expires 1y;
                   add_header Cache-Control "public, immutable";
@@ -381,13 +366,20 @@
         immediate: yes
       when: dry_run is not defined or not dry_run
 
-    # START SERVICES
+    # START SERVICES (excluding nginx for now)
     - name: Enable and start services
       systemd:
         name: "{{ item }}"
         state: started
         enabled: yes
       loop: "{{ services }}"
+      when: dry_run is not defined or not dry_run
+
+    - name: Enable nginx service (but don't start yet)
+      systemd:
+        name: nginx
+        enabled: yes
+        state: stopped
       when: dry_run is not defined or not dry_run
 
     # VERIFICATION
@@ -421,18 +413,27 @@
           {{ php_extensions.stdout }}
           
           Configuration:
-          - Nginx: Frontend proxy (ports 80/443)
-          - Apache: Backend server (port {{ apache_port }})
+          - Nginx: Frontend proxy (ports 80/443) - ENABLED BUT NOT STARTED
+          - Apache: Backend server (port {{ apache_port }}) - RUNNING
           - PHP: 8.2 with Invoice Ninja required extensions
           - MariaDB: {{ mariadb_version }}
           - Redis: Configured for caching
           
-          Next steps:
+          IMPORTANT - SSL Certificate Setup Required:
+          
+          1. First, make sure {{ domain_name }} points to this server's IP
+          2. Run this command to get SSL certificates and start nginx:
+          
+             sudo certbot --nginx -d {{ domain_name }}
+          
+          3. After certbot completes, nginx will be automatically configured and started
+          
+          Other next steps:
           1. Run 'sudo mysql_secure_installation' to secure MariaDB
           2. Create database and user for Invoice Ninja
-          3. Install SSL certificates: certbot --nginx -d {{ domain_name }}
-          4. Download and configure Invoice Ninja in /var/www/html/invoice-ninja
-          5. Test access via https://{{ domain_name }}
+          3. Download and configure Invoice Ninja in /var/www/html/invoice-ninja
+          4. Test HTTP access first: http://{{ domain_name }}
+          5. After SSL setup, test HTTPS: https://{{ domain_name }}
       when: dry_run is not defined or not dry_run
 
   handlers:
