@@ -12,7 +12,7 @@
     apache_port: "8080"
     domain_name: "{{ invoice_ninja_domain | default('localhost') }}"
     
-    # Invoice Ninja specific packages
+    # Invoice Ninja specific packages - minimal required set
     packages:
       - httpd
       - nginx
@@ -22,7 +22,6 @@
       - php
       - php-fpm
       - php-mysqlnd
-      - php-pdo
       - php-gd
       - php-mbstring
       - php-xml
@@ -33,51 +32,15 @@
       - php-soap
       - php-bcmath
       - php-opcache
-      - php-redis
       - php-cli
       - php-common
-      - php-devel
-      - php-ctype
-      - php-openssl
-      - php-tokenizer
-      - php-iconv
-      - php-gmp
       - ImageMagick
       - php-imagick
-      - gcc
-      - gcc-c++
-      - make
-      - cmake
-      - autoconf
-      - automake
-      - libtool
-      - pkgconfig
       - git
       - wget
       - curl
-      - vim
-      - nano
-      - htop
-      - tree
       - unzip
       - zip
-      - tar
-      - rsync
-      - openssl-devel
-      - zlib-devel
-      - libcurl-devel
-      - libxml2-devel
-      - sqlite-devel
-      - bzip2-devel
-      - readline-devel
-      - ncurses-devel
-      - gdbm-devel
-      - db4-devel
-      - libffi-devel
-      - expat-devel
-      - python3-pip
-      - nodejs
-      - npm
       - composer
       - certbot
       - python3-certbot-nginx
