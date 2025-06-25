@@ -292,23 +292,59 @@
       when: dry_run is not defined or not dry_run
 
     # REDIS CONFIGURATION
-    - name: Configure Redis for Invoice Ninja
+    - name: Find Redis configuration file
+      find:
+        paths:
+          - /etc/redis
+          - /etc
+          - /usr/local/etc
+        patterns: 'redis.conf'
+        file_type: file
+      register: redis_conf_search
+      when: dry_run is not defined or not dry_run
+
+    - name: Set Redis config file path
+      set_fact:
+        redis_config_path: "{{ redis_conf_search.files[0].path if redis_conf_search.files | length > 0 else '/etc/redis/redis.conf' }}"
+      when: dry_run is not defined or not dry_run
+
+    - name: Display Redis config file location
+      debug:
+        msg: "Using Redis config file: {{ redis_config_path }}"
+      when: dry_run is not defined or not dry_run
+
+    - name: Configure Redis for Invoice Ninja (maxmemory)
       lineinfile:
-        path: /etc/redis.conf
+        path: "{{ redis_config_path }}"
         regexp: '^# maxmemory <bytes>'
         line: 'maxmemory 256mb'
         backup: yes
+        create: no
       notify: restart redis
-      when: dry_run is not defined or not dry_run
+      when: 
+        - dry_run is not defined or not dry_run
+        - redis_conf_search.files | length > 0
+      ignore_errors: yes
 
-    - name: Configure Redis maxmemory policy
+    - name: Configure Redis for Invoice Ninja (maxmemory-policy)
       lineinfile:
-        path: /etc/redis.conf
+        path: "{{ redis_config_path }}"
         regexp: '^# maxmemory-policy noeviction'
         line: 'maxmemory-policy allkeys-lru'
         backup: yes
+        create: no
       notify: restart redis
-      when: dry_run is not defined or not dry_run
+      when: 
+        - dry_run is not defined or not dry_run
+        - redis_conf_search.files | length > 0
+      ignore_errors: yes
+
+    - name: Skip Redis configuration if config file not found
+      debug:
+        msg: "Warning: Redis configuration file not found. Skipping Redis configuration. Redis will use default settings."
+      when: 
+        - dry_run is not defined or not dry_run
+        - redis_conf_search.files | length == 0
 
     # DIRECTORY AND PERMISSIONS
     - name: Create Invoice Ninja web directory
