@@ -1,0 +1,187 @@
+---
+- name: Install and configure Invoice Ninja on Debian 12
+  hosts: all
+  become: yes
+  vars:
+    domain: billing.wefixdit.com
+    install_dir: /var/www/{{ domain }}
+    inmanage_dir: "{{ install_dir }}/.inmanage"
+    db_name: ninja
+    db_user: ninja
+    db_password: ninja_secure_password
+    web_user: www-data
+    invoiceninja_url: https://{{ domain }}
+
+  tasks:
+    # Updating system and installing required packages
+    - name: Update apt cache and upgrade system
+      apt:
+        update_cache: yes
+        upgrade: dist
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      apt:
+        name:
+          - nginx
+          - mariadb-server
+          - mariadb-client
+          - php8.1
+          - php8.1-fpm
+          - php8.1-mysql
+          - php8.1-curl
+          - php8.1-gd
+          - php8.1-mbstring
+          - php8.1-xml
+          - php8.1-zip
+          - git
+          - curl
+          - unzip
+          - cron
+        state: present
+
+    # Configuring MariaDB
+    - name: Ensure MariaDB is running
+      service:
+        name: mariadb
+        state: started
+        enabled: yes
+
+    - name: Create MariaDB database for Invoice Ninja
+      mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Create MariaDB user for Invoice Ninja
+      mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        priv: "{{ db_name }}.*:ALL"
+        host: localhost
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    # Setting up installation directory
+    - name: Create installation directory
+      file:
+        path: "{{ install_dir }}"
+        state: directory
+        owner: "{{ web_user }}"
+        group: "{{ web_user }}"
+        mode: '0755'
+
+    # Installing inmanage script
+    - name: Clone inmanage repository
+      command: git clone https://github.com/DrDBanner/inmanage.git {{ inmanage_dir }}
+      args:
+        creates: "{{ inmanage_dir }}/inmanage.sh"
+      become_user: "{{ web_user }}"
+
+    - name: Set permissions for inmanage directory
+      file:
+        path: "{{ inmanage_dir }}"
+        owner: "{{ web_user }}"
+        group: "{{ web_user }}"
+        mode: '0755'
+        recurse: yes
+
+    # Running inmanage.sh for clean install
+    - name: Run inmanage.sh clean install
+      command: "{{ inmanage_dir }}/inmanage.sh clean_install"
+      args:
+        chdir: "{{ install_dir }}"
+      become_user: "{{ web_user }}"
+      environment:
+        INM_ENFORCED_USER: "{{ web_user }}"
+        INM_DB_PASSWORD_IN_BACKUP: "Y"
+
+    # Configuring NGINX
+    - name: Create NGINX configuration for Invoice Ninja
+      template:
+        src: invoiceninja_nginx.conf.j2
+        dest: /etc/nginx/sites-available/{{ domain }}
+        mode: '0644'
+
+    - name: Enable NGINX site
+      file:
+        src: /etc/nginx/sites-available/{{ domain }}
+        dest: /etc/nginx/sites-enabled/{{ domain }}
+        state: link
+
+    - name: Remove default NGINX site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload NGINX
+
+    # Setting up cron jobs
+    - name: Add cron job for Invoice Ninja scheduler
+      cron:
+        name: "Invoice Ninja scheduler"
+        minute: "*"
+        user: "{{ web_user }}"
+        job: "/usr/bin/php {{ install_dir }}/invoiceninja/artisan schedule:run >> /dev/null 2>&1"
+
+    - name: Add cron job for Invoice Ninja backup
+      cron:
+        name: "Invoice Ninja backup"
+        hour: "3"
+        minute: "*"
+        user: "{{ web_user }}"
+        job: "/usr/bin/bash -c \"{{ inmanage_dir }}/inmanage.sh backup\" >> /dev/null 2>&1"
+
+    # Optimizing Invoice Ninja
+    - name: Run artisan optimize
+      command: php artisan optimize
+      args:
+        chdir: "{{ install_dir }}/invoiceninja"
+      become_user: "{{ web_user }}"
+
+    # Handlers for service management
+  handlers:
+    - name: Reload NGINX
+      service:
+        name: nginx
+        state: reloaded
+
+# Template for NGINX configuration
+- name: NGINX configuration template
+  template:
+    content: |
+      server {
+        listen 80;
+        server_name {{ domain }};
+        root {{ install_dir }}/invoiceninja/public;
+        index index.php index.html index.htm;
+        client_max_body_size 20M;
+
+        gzip on;
+        gzip_types application/javascript application/x-javascript text/javascript text/plain application/xml application/json;
+        gzip_proxied no-cache no-store private expired auth;
+        gzip_min_length 1000;
+
+        location / {
+          try_files $uri $uri/ =404;
+        }
+
+        location ~* \.pdf$ {
+          add_header Cache-Control no-store;
+        }
+
+        if (!-e $request_filename) {
+          rewrite ^(.+)$ /index.php?q= last;
+        }
+
+        location ~ \.php$ {
+          include snippets/fastcgi-php.conf;
+          fastcgi_pass unix:/run/php/php8.1-fpm.sock;
+        }
+
+        location ~ /\.ht {
+          deny all;
+        }
+      }
+    dest: /etc/nginx/sites-available/{{ domain }}
+    mode: '0644'
+  when: false  # This task is not executed; it's used to define the template content
