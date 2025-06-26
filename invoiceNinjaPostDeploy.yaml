@@ -61,6 +61,30 @@
       when: item.rc != 0
       loop: "{{ extension_check.results }}"
 
+    # FIX APACHE USER HOME DIRECTORY PERMISSIONS
+    - name: Create apache user home directory
+      file:
+        path: /var/www
+        state: directory
+        owner: apache
+        group: apache
+        mode: '0755'
+
+    - name: Set apache user home directory
+      user:
+        name: apache
+        home: /var/www
+        shell: /bin/bash
+        create_home: yes
+
+    - name: Create .ansible temp directory for apache user
+      file:
+        path: /var/www/.ansible
+        state: directory
+        owner: apache
+        group: apache
+        mode: '0755'
+
     # MARIADB SECURITY AND DATABASE SETUP
     - name: Install Python MySQL connector
       package:
@@ -160,6 +184,31 @@
             mode: '0755'
             recurse: yes
 
+    # VERIFY ARTISAN FILE EXISTS
+    - name: Check if artisan file exists
+      stat:
+        path: "{{ ninja_path }}/artisan"
+      register: artisan_check
+
+    - name: Debug artisan file check
+      debug:
+        msg: "Artisan file exists: {{ artisan_check.stat.exists }}"
+
+    - name: List files in Invoice Ninja directory
+      shell: ls -la {{ ninja_path }}/
+      register: ninja_files
+      when: not artisan_check.stat.exists
+
+    - name: Show Invoice Ninja directory contents
+      debug:
+        msg: "{{ ninja_files.stdout_lines }}"
+      when: not artisan_check.stat.exists
+
+    - name: Fail if artisan doesn't exist
+      fail:
+        msg: "Artisan file not found at {{ ninja_path }}/artisan. Check if extraction was successful."
+      when: not artisan_check.stat.exists
+
     - name: Check if .env.example exists
       stat:
         path: "{{ ninja_path }}/.env.example"
@@ -224,6 +273,8 @@
       shell: |
         cd {{ ninja_path }}
         php artisan key:generate --force
+      environment:
+        HOME: /var/www
       become_user: apache
       register: app_key_gen
 
@@ -337,6 +388,8 @@
       shell: |
         cd {{ ninja_path }}
         composer install --no-dev --optimize-autoloader
+      environment:
+        HOME: /var/www
       become_user: apache
       when: not vendor_check.stat.exists
 
@@ -350,6 +403,8 @@
         php artisan config:cache
         php artisan route:cache
         php artisan view:cache
+      environment:
+        HOME: /var/www
       become_user: apache
       register: ninja_setup
 
@@ -376,6 +431,7 @@
           ExecStart=/usr/bin/php {{ ninja_path }}/artisan queue:work --sleep=3 --tries=3 --max-time=3600
           StandardOutput=journal
           StandardError=journal
+          Environment=HOME=/var/www
           [Install]
           WantedBy=multi-user.target
         dest: /etc/systemd/system/invoice-ninja-worker.service
@@ -426,6 +482,8 @@
       shell: |
         cd {{ ninja_path }}
         php artisan tinker --execute="DB::connection()->getPdo();"
+      environment:
+        HOME: /var/www
       become_user: apache
       register: db_test
       changed_when: false
