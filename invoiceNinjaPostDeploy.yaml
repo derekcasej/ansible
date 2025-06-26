@@ -62,6 +62,15 @@
       loop: "{{ extension_check.results }}"
 
     # MARIADB SECURITY AND DATABASE SETUP
+    - name: Install Python MySQL connector
+      package:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - python3-PyMySQL
+        - python3-mysqlclient
+      ignore_errors: yes
+
     - name: Check if MySQL root password is set
       shell: mysql -u root -p'{{ mysql_root_password }}' -e "SELECT 1;"
       register: mysql_root_check
@@ -72,57 +81,31 @@
     - name: Secure MariaDB installation (automated)
       block:
         - name: Set MariaDB root password
-          mysql_user:
-            name: root
-            password: "{{ mysql_root_password }}"
-            login_unix_socket: /var/lib/mysql/mysql.sock
+          shell: |
+            mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}';"
           when: mysql_root_check.rc != 0
 
         - name: Remove anonymous users
-          mysql_user:
-            name: ""
-            host_all: yes
-            state: absent
-            login_user: root
-            login_password: "{{ mysql_root_password }}"
+          shell: |
+            mysql -u root -p'{{ mysql_root_password }}' -e "DELETE FROM mysql.user WHERE User='';"
 
         - name: Remove test database
-          mysql_db:
-            name: test
-            state: absent
-            login_user: root
-            login_password: "{{ mysql_root_password }}"
+          shell: |
+            mysql -u root -p'{{ mysql_root_password }}' -e "DROP DATABASE IF EXISTS test;"
 
-        - name: Disallow root login remotely
-          mysql_user:
-            name: root
-            host: "{{ item }}"
-            state: absent
-            login_user: root
-            login_password: "{{ mysql_root_password }}"
-          loop:
-            - "{{ ansible_hostname }}"
-            - "127.0.0.1"
-            - "::1"
-          ignore_errors: yes
+        - name: Flush privileges
+          shell: |
+            mysql -u root -p'{{ mysql_root_password }}' -e "FLUSH PRIVILEGES;"
 
     - name: Create Invoice Ninja database
-      mysql_db:
-        name: "{{ ninja_db_name }}"
-        state: present
-        login_user: root
-        login_password: "{{ mysql_root_password }}"
-        encoding: utf8mb4
-        collation: utf8mb4_unicode_ci
+      shell: |
+        mysql -u root -p'{{ mysql_root_password }}' -e "CREATE DATABASE IF NOT EXISTS {{ ninja_db_name }} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
     - name: Create Invoice Ninja database user
-      mysql_user:
-        name: "{{ ninja_db_user }}"
-        password: "{{ ninja_db_password }}"
-        priv: "{{ ninja_db_name }}.*:ALL"
-        state: present
-        login_user: root
-        login_password: "{{ mysql_root_password }}"
+      shell: |
+        mysql -u root -p'{{ mysql_root_password }}' -e "CREATE USER IF NOT EXISTS '{{ ninja_db_user }}'@'localhost' IDENTIFIED BY '{{ ninja_db_password }}';"
+        mysql -u root -p'{{ mysql_root_password }}' -e "GRANT ALL PRIVILEGES ON {{ ninja_db_name }}.* TO '{{ ninja_db_user }}'@'localhost';"
+        mysql -u root -p'{{ mysql_root_password }}' -e "FLUSH PRIVILEGES;"
 
     # DOWNLOAD AND INSTALL INVOICE NINJA
     - name: Create Invoice Ninja directory
