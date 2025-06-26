@@ -42,21 +42,27 @@
         name: mariadb
       register: mariadb_status
 
-    - name: Verify PHP extensions are available
-      shell: php -m | grep -E "(bcmath|ctype|gd|mbstring|openssl|tokenizer|xml|curl|zip|mysqli|intl|soap|imagick)"
-      register: php_extensions_check
-      changed_when: false
+- name: Get all PHP extensions
+  shell: php -m
+  register: php_extensions_check
+  changed_when: false
 
-    - name: Validate PHP extensions for Invoice Ninja
-      assert:
-        that:
-          - "'bcmath' in php_extensions_check.stdout"
-          - "'gd' in php_extensions_check.stdout"
-          - "'mbstring' in php_extensions_check.stdout"
-          - "'curl' in php_extensions_check.stdout"
-          - "'zip' in php_extensions_check.stdout"
-          - "'mysqli' in php_extensions_check.stdout"
-        fail_msg: "Required PHP extensions are missing. Please run the main installation playbook first."
+- name: Validate PHP extensions for Invoice Ninja
+  assert:
+    that:
+      - "'bcmath' in php_extensions_check.stdout"
+      - "'ctype' in php_extensions_check.stdout"  
+      - "'gd' in php_extensions_check.stdout"
+      - "'mbstring' in php_extensions_check.stdout"
+      - "'openssl' in php_extensions_check.stdout"
+      - "'tokenizer' in php_extensions_check.stdout"
+      - "'xml' in php_extensions_check.stdout"
+      - "'curl' in php_extensions_check.stdout"
+      - "'zip' in php_extensions_check.stdout"
+      - "'mysqli' in php_extensions_check.stdout"
+      - "'intl' in php_extensions_check.stdout"
+    fail_msg: "Required PHP extensions are missing: {{ php_extensions_check.stdout }}"
+    success_msg: "All required PHP extensions are available."
 
     # MARIADB SECURITY AND DATABASE SETUP
     - name: Check if MySQL root password is set
