@@ -14,6 +14,8 @@
     ninja_path: "/var/www/html/invoice-ninja"
     ninja_url: "{{ invoice_ninja_domain | default('localhost') }}"
     ninja_admin_email: "{{ ninja_admin_email | default('admin@example.com') }}"
+    # Apache backend port (nginx will proxy to this)
+    apache_backend_port: "8081"
     # SSL configuration
     enable_ssl: "{{ enable_ssl | default(false) }}"
     # Email configuration (optional)
@@ -62,6 +64,15 @@
       loop: "{{ extension_check.results }}"
 
     # FIX APACHE USER HOME DIRECTORY PERMISSIONS
+    - name: Stop Apache and PHP-FPM for user configuration
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - httpd
+        - php-fpm
+      ignore_errors: yes
+
     - name: Create apache user home directory
       file:
         path: /var/www
@@ -70,7 +81,7 @@
         group: apache
         mode: '0755'
 
-    - name: Set apache user home directory
+    - name: Set apache user home directory and shell
       user:
         name: apache
         home: /var/www
@@ -80,6 +91,14 @@
     - name: Create .ansible temp directory for apache user
       file:
         path: /var/www/.ansible
+        state: directory
+        owner: apache
+        group: apache
+        mode: '0755'
+
+    - name: Create tmp directory for apache user
+      file:
+        path: /var/www/tmp
         state: directory
         owner: apache
         group: apache
@@ -275,6 +294,8 @@
         php artisan key:generate --force
       environment:
         HOME: /var/www
+        TMPDIR: /var/www/tmp
+        ANSIBLE_REMOTE_TEMP: /var/www/.ansible
       become_user: apache
       register: app_key_gen
 
@@ -319,23 +340,30 @@
         - { regexp: '^MAIL_FROM_NAME=', line: 'MAIL_FROM_NAME="{{ mail_from_name }}"' }
       when: mail_driver != 'log'
 
-    # CONFIGURE APACHE VIRTUAL HOST
-    - name: Create Apache virtual host for Invoice Ninja
+    # CONFIGURE APACHE VIRTUAL HOST (Backend)
+    - name: Create Apache virtual host for Invoice Ninja (backend)
       copy:
         content: |
-          <VirtualHost *:{{ apache_port | default('8080') }}>
+          # Apache backend configuration for Invoice Ninja
+          Listen {{ apache_backend_port }}
+          
+          <VirtualHost *:{{ apache_backend_port }}>
               ServerName {{ ninja_url }}
               DocumentRoot {{ ninja_path }}/public
+              
               <Directory {{ ninja_path }}/public>
                   Options -Indexes +FollowSymLinks
                   AllowOverride All
                   Require all granted
-                  # Security headers
+                  
+                  # Security headers (nginx will also add these)
                   Header always set X-Frame-Options "SAMEORIGIN"
                   Header always set X-Content-Type-Options "nosniff"
                   Header always set X-XSS-Protection "1; mode=block"
+                  
                   # Disable server signature
                   ServerSignature Off
+                  
                   # Enable compression
                   <IfModule mod_deflate.c>
                       AddOutputFilterByType DEFLATE text/plain
@@ -349,6 +377,7 @@
                       AddOutputFilterByType DEFLATE application/x-javascript
                       AddOutputFilterByType DEFLATE application/json
                   </IfModule>
+                  
                   # Cache static assets
                   <IfModule mod_expires.c>
                       ExpiresActive On
@@ -366,13 +395,19 @@
                       ExpiresDefault "access plus 2 days"
                   </IfModule>
               </Directory>
+              
               # Logging
               ErrorLog /var/log/httpd/invoice-ninja_error.log
               CustomLog /var/log/httpd/invoice-ninja_access.log combined
+              
               # PHP-FPM Configuration
               <FilesMatch \.php$>
                   SetHandler "proxy:unix:/run/php-fpm/www.sock|fcgi://localhost"
               </FilesMatch>
+              
+              # Real IP forwarding from nginx
+              RemoteIPHeader X-Forwarded-For
+              RemoteIPTrustedProxy 127.0.0.1
           </VirtualHost>
         dest: /etc/httpd/conf.d/invoice-ninja.conf
         backup: yes
@@ -390,6 +425,8 @@
         composer install --no-dev --optimize-autoloader
       environment:
         HOME: /var/www
+        TMPDIR: /var/www/tmp
+        ANSIBLE_REMOTE_TEMP: /var/www/.ansible
       become_user: apache
       when: not vendor_check.stat.exists
 
@@ -405,6 +442,8 @@
         php artisan view:cache
       environment:
         HOME: /var/www
+        TMPDIR: /var/www/tmp
+        ANSIBLE_REMOTE_TEMP: /var/www/.ansible
       become_user: apache
       register: ninja_setup
 
@@ -444,25 +483,38 @@
         enabled: yes
         daemon_reload: yes
 
+    # START SERVICES IN CORRECT ORDER
+    - name: Start PHP-FPM
+      systemd:
+        name: php-fpm
+        state: started
+        enabled: yes
+
+    - name: Start Apache (backend)
+      systemd:
+        name: httpd
+        state: started
+        enabled: yes
+
     # SSL CERTIFICATE SETUP (if enabled)
     - name: Setup SSL certificate with Certbot
       block:
         - name: Generate SSL certificate
           shell: certbot --nginx -d {{ ninja_url }} --non-interactive --agree-tos --email {{ ninja_admin_email }}
           register: certbot_result
-
-        - name: Start nginx after SSL setup
+          
+        - name: Update nginx config after SSL setup
           systemd:
             name: nginx
-            state: started
+            state: reloaded
       when: enable_ssl and ninja_url != 'localhost'
 
-    # START NGINX (if SSL not enabled)
-    - name: Start nginx for HTTP access
+    # START NGINX (frontend)
+    - name: Start nginx (frontend)
       systemd:
         name: nginx
         state: started
-      when: not enable_ssl or ninja_url == 'localhost'
+        enabled: yes
 
     # CLEANUP
     - name: Remove downloaded tar file
@@ -484,20 +536,22 @@
         php artisan tinker --execute="DB::connection()->getPdo();"
       environment:
         HOME: /var/www
+        TMPDIR: /var/www/tmp
+        ANSIBLE_REMOTE_TEMP: /var/www/.ansible
       become_user: apache
       register: db_test
       changed_when: false
 
-    - name: Test HTTP access
+    - name: Test HTTP access via nginx
       uri:
         url: "http://{{ ninja_url if ninja_url != 'localhost' else ansible_default_ipv4.address }}"
         method: GET
-        status_code: [200, 302]
+        status_code: [200, 302, 301]
         timeout: 30
       register: http_test
       ignore_errors: yes
 
-    - name: Test HTTPS access (if SSL enabled)
+    - name: Test HTTPS access via nginx (if SSL enabled)
       uri:
         url: "https://{{ ninja_url }}"
         method: GET
@@ -507,6 +561,15 @@
       register: https_test
       ignore_errors: yes
       when: enable_ssl and ninja_url != 'localhost'
+
+    - name: Test Apache backend directly
+      uri:
+        url: "http://127.0.0.1:{{ apache_backend_port }}"
+        method: GET
+        status_code: [200, 302]
+        timeout: 30
+      register: backend_test
+      ignore_errors: yes
 
     # DISPLAY FINAL RESULTS
     - name: Display installation summary
@@ -531,12 +594,18 @@
           - HTTP URL: http://{{ ansible_default_ipv4.address }}
           {% endif %}
           Service Status:
-          - HTTP Test: {{ 'PASSED' if http_test.status == 200 or http_test.status == 302 else 'FAILED' }}
+          - HTTP Test (Nginx): {{ 'PASSED' if http_test.status == 200 or http_test.status == 302 or http_test.status == 301 else 'FAILED' }}
+          - Backend Test (Apache): {{ 'PASSED' if backend_test.status == 200 or backend_test.status == 302 else 'FAILED' }}
           {% if enable_ssl and ninja_url != 'localhost' %}
-          - HTTPS Test: {{ 'PASSED' if https_test.status == 200 or https_test.status == 302 else 'FAILED' }}
+          - HTTPS Test (Nginx): {{ 'PASSED' if https_test.status == 200 or https_test.status == 302 else 'FAILED' }}
           {% endif %}
           - Database Test: {{ 'PASSED' if db_test.rc == 0 else 'FAILED' }}
           - Queue Worker: {{ 'RUNNING' if ansible_facts.services['invoice-ninja-worker.service']['state'] == 'running' else 'STOPPED' }}
+          
+          Architecture:
+          - Nginx (Frontend): Port 80/443 -> Apache (Backend): Port {{ apache_backend_port }}
+          - SSL: {{ 'Enabled' if enable_ssl else 'Disabled' }}
+          - Redis: Enabled for caching and sessions
           Next Steps:
           1. Navigate to your Invoice Ninja URL to complete the setup wizard
           2. Create your admin account during setup
