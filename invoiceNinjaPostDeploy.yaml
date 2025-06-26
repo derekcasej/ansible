@@ -3,23 +3,19 @@
   hosts: all
   become: yes
   gather_facts: yes
-  
   vars:
     # Database configuration
     mysql_root_password: "{{ mysql_root_password | default('changeme123!') }}"
     ninja_db_name: "ninja"
     ninja_db_user: "ninja_user"
     ninja_db_password: "{{ ninja_db_password | default('ninja_secure_pass123!') }}"
-    
     # Invoice Ninja configuration
     ninja_version: "v5.11.53"  # Latest stable version
     ninja_path: "/var/www/html/invoice-ninja"
     ninja_url: "{{ invoice_ninja_domain | default('localhost') }}"
     ninja_admin_email: "{{ ninja_admin_email | default('admin@example.com') }}"
-    
     # SSL configuration
     enable_ssl: "{{ enable_ssl | default(false) }}"
-    
     # Email configuration (optional)
     mail_driver: "{{ mail_driver | default('log') }}"
     mail_host: "{{ mail_host | default('') }}"
@@ -42,27 +38,25 @@
         name: mariadb
       register: mariadb_status
 
-- name: Get all PHP extensions
-  shell: php -m
-  register: php_extensions_check
-  changed_when: false
+    - name: Get all PHP extensions
+      shell: php -m
+      register: php_extensions_check
+      changed_when: false
 
-- name: Validate PHP extensions for Invoice Ninja
-  assert:
-    that:
-      - "'bcmath' in php_extensions_check.stdout"
-      - "'ctype' in php_extensions_check.stdout"  
-      - "'gd' in php_extensions_check.stdout"
-      - "'mbstring' in php_extensions_check.stdout"
-      - "'openssl' in php_extensions_check.stdout"
-      - "'tokenizer' in php_extensions_check.stdout"
-      - "'xml' in php_extensions_check.stdout"
-      - "'curl' in php_extensions_check.stdout"
-      - "'zip' in php_extensions_check.stdout"
-      - "'mysqli' in php_extensions_check.stdout"
-      - "'intl' in php_extensions_check.stdout"
-    fail_msg: "Required PHP extensions are missing: {{ php_extensions_check.stdout }}"
-    success_msg: "All required PHP extensions are available."
+    - name: Validate PHP extensions for Invoice Ninja
+      assert:
+        that:
+          - "'bcmath' in php_extensions_check.stdout"
+          - "'ctype' in php_extensions_check.stdout"
+          - "'gd' in php_extensions_check.stdout"
+          - "'mbstring' in php_extensions_check.stdout"
+          - "'openssl' in php_extensions_check.stdout"
+          - "'tokenizer' in php_extensions_check.stdout"
+          - "'xml' in php_extensions_check.stdout"
+          - "'curl' in php_extensions_check.stdout"
+          - "'zip' in php_extensions_check.stdout"
+          - "'mysqli' in php_extensions_check.stdout"
+        fail_msg: "Required PHP extensions are missing. Please run the main installation playbook first."
 
     # MARIADB SECURITY AND DATABASE SETUP
     - name: Check if MySQL root password is set
@@ -156,10 +150,10 @@
       block:
         - name: Set directory permissions
           shell: find {{ ninja_path }} -type d -exec chmod 755 {} \;
-          
+
         - name: Set file permissions
           shell: find {{ ninja_path }} -type f -exec chmod 644 {} \;
-          
+
         - name: Set storage directory permissions
           file:
             path: "{{ ninja_path }}/storage"
@@ -168,7 +162,7 @@
             group: apache
             mode: '0755'
             recurse: yes
-            
+
         - name: Set bootstrap/cache directory permissions
           file:
             path: "{{ ninja_path }}/bootstrap/cache"
@@ -244,20 +238,16 @@
           <VirtualHost *:{{ apache_port | default('8080') }}>
               ServerName {{ ninja_url }}
               DocumentRoot {{ ninja_path }}/public
-              
               <Directory {{ ninja_path }}/public>
                   Options -Indexes +FollowSymLinks
                   AllowOverride All
                   Require all granted
-                  
                   # Security headers
                   Header always set X-Frame-Options "SAMEORIGIN"
                   Header always set X-Content-Type-Options "nosniff"
                   Header always set X-XSS-Protection "1; mode=block"
-                  
                   # Disable server signature
                   ServerSignature Off
-                  
                   # Enable compression
                   <IfModule mod_deflate.c>
                       AddOutputFilterByType DEFLATE text/plain
@@ -271,7 +261,6 @@
                       AddOutputFilterByType DEFLATE application/x-javascript
                       AddOutputFilterByType DEFLATE application/json
                   </IfModule>
-                  
                   # Cache static assets
                   <IfModule mod_expires.c>
                       ExpiresActive On
@@ -289,11 +278,9 @@
                       ExpiresDefault "access plus 2 days"
                   </IfModule>
               </Directory>
-              
               # Logging
               ErrorLog /var/log/httpd/invoice-ninja_error.log
               CustomLog /var/log/httpd/invoice-ninja_access.log combined
-              
               # PHP-FPM Configuration
               <FilesMatch \.php$>
                   SetHandler "proxy:unix:/run/php-fpm/www.sock|fcgi://localhost"
@@ -328,7 +315,7 @@
         php artisan view:cache
       become_user: apache
       register: ninja_setup
-      
+
     # SETUP CRON JOB FOR LARAVEL SCHEDULER
     - name: Setup Laravel scheduler cron job
       cron:
@@ -344,7 +331,6 @@
           [Unit]
           Description=Invoice Ninja Queue Worker
           After=network.target
-          
           [Service]
           Type=simple
           User=apache
@@ -353,7 +339,6 @@
           ExecStart=/usr/bin/php {{ ninja_path }}/artisan queue:work --sleep=3 --tries=3 --max-time=3600
           StandardOutput=journal
           StandardError=journal
-          
           [Install]
           WantedBy=multi-user.target
         dest: /etc/systemd/system/invoice-ninja-worker.service
@@ -372,12 +357,11 @@
         - name: Generate SSL certificate
           shell: certbot --nginx -d {{ ninja_url }} --non-interactive --agree-tos --email {{ ninja_admin_email }}
           register: certbot_result
-          
+
         - name: Start nginx after SSL setup
           systemd:
             name: nginx
             state: started
-            
       when: enable_ssl and ninja_url != 'localhost'
 
     # START NGINX (if SSL not enabled)
@@ -436,13 +420,11 @@
           ==========================================
           Invoice Ninja Installation Complete!
           ==========================================
-          
           Installation Details:
           - Version: {{ ninja_version }}
           - Path: {{ ninja_path }}
           - Database: {{ ninja_db_name }}
           - Database User: {{ ninja_db_user }}
-          
           Access Information:
           {% if ninja_url != 'localhost' %}
           - HTTP URL: http://{{ ninja_url }}
@@ -453,7 +435,6 @@
           {% else %}
           - HTTP URL: http://{{ ansible_default_ipv4.address }}
           {% endif %}
-          
           Service Status:
           - HTTP Test: {{ 'PASSED' if http_test.status == 200 or http_test.status == 302 else 'FAILED' }}
           {% if enable_ssl and ninja_url != 'localhost' %}
@@ -461,25 +442,21 @@
           {% endif %}
           - Database Test: {{ 'PASSED' if db_test.rc == 0 else 'FAILED' }}
           - Queue Worker: {{ 'RUNNING' if ansible_facts.services['invoice-ninja-worker.service']['state'] == 'running' else 'STOPPED' }}
-          
           Next Steps:
           1. Navigate to your Invoice Ninja URL to complete the setup wizard
           2. Create your admin account during setup
           3. Configure your company settings
           4. Test invoice creation and PDF generation
-          
           Important Files:
           - Configuration: {{ ninja_path }}/.env
           - Logs: {{ ninja_path }}/storage/logs/
           - Apache Config: /etc/httpd/conf.d/invoice-ninja.conf
           - Nginx Config: /etc/nginx/conf.d/invoice-ninja.conf
-          
           Troubleshooting:
           - Check logs: tail -f {{ ninja_path }}/storage/logs/laravel.log
           - Test artisan: cd {{ ninja_path }} && sudo -u apache php artisan list
           - Check queue: sudo systemctl status invoice-ninja-worker
           - Check services: sudo systemctl status httpd nginx mariadb redis php-fpm
-          
           ==========================================
 
   handlers:
@@ -487,12 +464,12 @@
       systemd:
         name: httpd
         state: restarted
-        
+
     - name: restart nginx
       systemd:
         name: nginx
         state: restarted
-        
+
     - name: restart php-fpm
       systemd:
         name: php-fpm
